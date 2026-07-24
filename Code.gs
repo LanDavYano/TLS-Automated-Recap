@@ -30,7 +30,7 @@ function doPost(e) {
   } catch (err) {
     console.error('doPost error: ' + (err && err.stack ? err.stack : err));
   }
-  return ContentService.createTextOutput('ok');
+
 }
 
 // ---------------------------------------------------------------------------
