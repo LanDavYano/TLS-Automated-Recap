@@ -1,5 +1,12 @@
 # SPECS.md — `/recap` Telegram Bot (Google Apps Script)
 
+> **Status: as-built.** This document is both the original design contract and
+> the current specification of the deployed bot. The implementation lives in a
+> single file, [`Code.gs`](Code.gs). For setup, deployment, and maintenance
+> instructions, see [README.md](README.md). Where this spec and `Code.gs`
+> diverge, `Code.gs` is the source of truth — this document is kept in sync with
+> it.
+
 ## Purpose
 
 A Telegram bot for a student sports newsroom. When a staffer types `/recap ADMU` in a
@@ -168,10 +175,20 @@ without waiting out the TTL.
 
 ## Error handling and response contract
 
-`doPost` must **always** return a `200`. Telegram retries on non-200, which would cause
-duplicate documents. Wrap the entire handler body in try/catch, log the error via
-`console.error`, attempt to notify the user in-thread, and return
-`ContentService.createTextOutput('ok')` regardless.
+`doPost` must **always** resolve with a `200`. Telegram retries on any non-200,
+which would create duplicate documents.
+
+The guarantee is met by **never letting `doPost` throw**: the entire handler body
+is wrapped in try/catch, errors are logged via `console.error`, and the user is
+notified in-thread wherever the chat/thread is known. Apps Script serves an HTTP
+`200` for any `doPost` execution that completes without throwing, so an explicit
+response object is not required — the current implementation returns nothing and
+relies on this behavior (verified in production).
+
+> If you ever want an explicit, self-documenting response, adding
+> `return ContentService.createTextOutput('ok');` as the final line of `doPost`
+> is equivalent and harmless. Either form is acceptable; the non-negotiable rule
+> is the one below.
 
 Do not throw out of `doPost` under any circumstance.
 
@@ -201,7 +218,7 @@ logic that depends on it.
 Single file, `Code.gs`, organized as:
 
 ```javascript
-function doPost(e)              // entry point, try/catch wrapper, always returns 200
+function doPost(e)              // entry point, try/catch wrapper, never throws (always 200)
 function handleUpdate(update)   // parse, route, orchestrate
 function parseCommand(text)     // strip @botname, return {command, args}
 function getSportsMap()         // cached sheet read, header-driven column mapping
@@ -240,6 +257,10 @@ parsing and string comparison of the large negative chat IDs.
 ---
 
 ## Deployment notes for the human
+
+> These steps are mirrored, with troubleshooting and handoff details, in
+> [README.md](README.md#deploying-a-change). Keep the two in sync if you change
+> the process.
 
 After the code is in place:
 
