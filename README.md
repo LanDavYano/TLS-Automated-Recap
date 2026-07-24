@@ -16,10 +16,30 @@ game, and manually filing the finished doc into the right Drive folder.
 > **Status:** Live and in production. Built on Google Apps Script, deployed as a
 > Web App, driven by a Telegram webhook.
 
+## 1. What it does
+
+- **Runs on demand, not on a schedule** — a staffer types `/recap <OPPONENT>` in
+  a sport's forum topic and the doc exists seconds later. No dashboard, no manual
+  file duplication, no filing.
+- **Resolves the thread to its sport** — reads the `Sports` tracker to turn the
+  `(chat_id, thread_id)` of the topic into that sport's league, name, Drive
+  folder, and Docs template. Column order in the sheet doesn't matter; lookups
+  are cached for 5 minutes.
+- **Creates the game doc** — copies the sport's template into the correct Shared
+  Drive folder, named by convention:
+  `UAAP: Men's Basketball - ADMU - 2026-09-06` (opponent uppercased, today's date
+  in Manila time).
+- **Replies in-thread with the link** — the document name and URL land in the
+  same forum topic the command came from, so the staffer never leaves Telegram.
+- **Fails loudly, never silently** — a bare `/recap`, an unmapped thread, or a
+  Drive error each get a specific, actionable reply in-thread (the unmapped one
+  even prints the exact IDs to add to the sheet). And it *always* returns `200`
+  to Telegram, so a hiccup can never trigger a retry that double-creates a doc.
+
 ---
 
 
-## 1. How it works
+## 2. How it works
 
 ```
 Telegram group (forum)                 Google Apps Script                Google Workspace
@@ -50,7 +70,7 @@ handling, and security model — is in [SPECS.md](SPECS.md).
 
 ---
 
-## 2. Repository layout
+## 3. Repository layout
 
 | File | Purpose |
 |---|---|
@@ -66,7 +86,7 @@ only tooling, and it runs the raw `Code.gs`.
 
 ---
 
-## 3. Configuration
+## 4. Configuration
 
 Nothing is hardcoded. All secrets and IDs live in **Script Properties** (read via
 `PropertiesService.getScriptProperties()`), and all per-sport routing lives in
@@ -109,7 +129,7 @@ Shared Drive folder — that is enough for `makeCopy()` to create files.
 
 ---
 
-## 4. Local development with clasp
+## 5. Local development with clasp
 
 [`clasp`](https://github.com/google/clasp) is Google's CLI for pushing/pulling
 Apps Script code. It's already wired to this project via `.clasp.json`
@@ -140,7 +160,7 @@ version to the live webhook — see the next section.
 
 ---
 
-## 5. Deploying a change
+## 6. Deploying a change
 
 The live webhook points at a specific **deployment**, not at the editor code.
 After `clasp push`, the new code is in the editor but the webhook still runs the
@@ -168,7 +188,7 @@ The `/exec` URL stays the same, so no webhook change is needed.
 
 ---
 
-## 6. Registering / checking the webhook
+## 7. Registering / checking the webhook
 
 Apps Script can't read request headers, so Telegram's `secret_token` can't be
 validated — the obscurity of the `/exec` URL is the protection. **Keep that URL
@@ -188,7 +208,7 @@ unmapped.
 
 ---
 
-## 7. Common tasks
+## 8. Common tasks
 
 ### Onboard a new sport / thread
 
@@ -214,7 +234,7 @@ wait it out or run the `clearCache()` function once from the Apps Script editor
 
 ---
 
-## 8. Testing
+## 9. Testing
 
 Two functions run from the editor with no Telegram traffic required:
 
@@ -236,7 +256,7 @@ folder — delete the test doc afterward if you don't want it.
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -253,7 +273,7 @@ Logs live in the Apps Script editor under **Executions** (and Cloud Logging via
 
 ---
 
-## 10. Handoff checklist
+## 11. Handoff checklist
 
 When taking over or handing off this project, make sure you have / transfer:
 
