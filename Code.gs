@@ -284,7 +284,11 @@ function handleSetup(message, chatId, threadId, args) {
       values.season = season;
     }
 
-    var result = upsertSportRow(values);
+    // Read once, then both scan and write against the same snapshot: the scan
+    // must see the sheet as it was *before* this row is written.
+    var ctx = readSportsSheet();
+    var sharers = findFolderSharers(ctx, values.folder_id, chatId, threadId);
+    var result = upsertSportRow(values, ctx);
     clearCache();
 
     sendMessage(chatId, threadId,
@@ -292,7 +296,8 @@ function handleSetup(message, chatId, threadId, args) {
       league + ' — ' + sport + '\n' +
       'Folder: ' + folderName + (resolved.created ? ' (created)' : ' (existing)') + '\n' +
       resolved.folder.getUrl() + '\n\n' +
-      'Ready — try /recap ADMU here.');
+      'Ready — try /recap ADMU here.' +
+      buildSharingWarning(sharers));
   } catch (err) {
     console.error('handleSetup error: ' + (err && err.stack ? err.stack : err));
     sendMessage(chatId, threadId, "Couldn't finish setup: " + err.message);
@@ -514,8 +519,8 @@ function readSportsSheet() {
  *
  * Callers must hold the script lock — this is read-modify-write.
  */
-function upsertSportRow(values) {
-  var ctx = readSportsSheet();
+function upsertSportRow(values, ctx) {
+  ctx = ctx || readSportsSheet();
   var data = ctx.data;
   var col = ctx.col;
   var width = data[0].length;
@@ -540,6 +545,88 @@ function upsertSportRow(values) {
   applyValues(fresh, col, values);
   ctx.sheet.appendRow(fresh);
   return { updated: false, rowNumber: ctx.sheet.getLastRow() };
+}
+
+/**
+ * Other active rows already pointing at `folderId`, excluding the row for
+ * (chatId, threadId) itself.
+ *
+ * Sharing a folder is legal and won't error — but it's nearly always a mistake:
+ * either SPORTS_ROOT_FOLDER_ID is still pointing at a previous season's (or the
+ * testing) Sports folder, or the same sport got mapped to two topics. Docs from
+ * every sharer pile into one folder, and nothing else in the system would ever
+ * mention it. So /setup says so at the moment it happens.
+ */
+function findFolderSharers(ctx, folderId, chatId, threadId) {
+  var col = ctx.col;
+  if (typeof col.folder_id === 'undefined' || typeof col.active === 'undefined') {
+    return [];
+  }
+
+  var wantFolder = String(folderId).trim();
+  var wantChat = String(chatId).trim();
+  var wantThread = String(threadId).trim();
+  var sharers = [];
+
+  for (var i = 1; i < ctx.data.length; i++) {
+    var row = ctx.data[i];
+    if (String(row[col.active]).trim().toUpperCase() !== 'TRUE') {
+      continue;
+    }
+    if (String(row[col.folder_id]).trim() !== wantFolder) {
+      continue;
+    }
+
+    var sameChat = String(row[col.chat_id]).trim() === wantChat;
+    if (sameChat && String(row[col.thread_id]).trim() === wantThread) {
+      continue; // the row we're about to write
+    }
+
+    sharers.push({
+      sameChat: sameChat,
+      chatId: row[col.chat_id],
+      threadId: row[col.thread_id],
+      league: typeof col.league === 'undefined' ? '' : row[col.league],
+      sport: typeof col.sport === 'undefined' ? '' : row[col.sport]
+    });
+  }
+
+  return sharers;
+}
+
+/**
+ * Renders the folder-sharing warning appended to a /setup reply, or '' when
+ * there's nothing to flag. Names every sharer, and points at the most likely
+ * cause when one of them is a different group.
+ */
+function buildSharingWarning(sharers) {
+  if (!sharers.length) {
+    return '';
+  }
+
+  var fromAnotherGroup = false;
+  var lines = [];
+  for (var i = 0; i < sharers.length; i++) {
+    var s = sharers[i];
+    if (!s.sameChat) {
+      fromAnotherGroup = true;
+    }
+    lines.push('• ' + s.league + ' — ' + s.sport +
+      (s.sameChat
+        ? ' (this group, thread ' + s.threadId + ')'
+        : ' (another group, chat ' + s.chatId + ')'));
+  }
+
+  var text = '\n\n⚠️ This folder is already in use by:\n' + lines.join('\n') +
+    '\nDocs from all of them will land in the same folder.';
+
+  if (fromAnotherGroup) {
+    text += '\n\nIf that other group is the testing GC, check that ' +
+      PROP_SPORTS_ROOT + ' points at the current season’s Sports folder, ' +
+      'then set the old rows to active = FALSE.';
+  }
+
+  return text;
 }
 
 /** Writes each known key of `values` into its column position in `rowArray`. */

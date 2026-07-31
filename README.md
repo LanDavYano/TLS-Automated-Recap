@@ -46,7 +46,7 @@ game, and manually filing the finished doc into the right Drive folder.
 | Command | Who | What it does |
 |---|---|---|
 | `/recap <OPPONENT>` | Anyone | Creates the game doc for this topic's sport and replies with the link. |
-| `/setup <LEAGUE> \| <Sport>` | Group admins | Maps the topic it's typed in — folder, row, and all. Safe to re-run. |
+| `/setup <LEAGUE> \| <Sport>` | Group admins | Maps the topic it's typed in — folder, row, and all. Safe to re-run. Warns if the folder is already used by another mapping. |
 | `/sports` | Anyone | Lists the sports mapped in this group. |
 | `/whereami` | Anyone | Prints this topic's `chat_id` / `thread_id` and whether it's mapped. |
 
@@ -264,6 +264,15 @@ No IDs to extract, no sheet to open, no `clearCache()` to run.
   `thread_id` to map.
 - Folder naming is `<LEAGUE> - <Sport>`, flat, one level under the Sports root.
   The league prefix keeps UAAP and NCAA versions of the same sport apart.
+- **It warns if the folder is already spoken for.** If another active row points
+  at the same folder, the reply appends a ⚠️ naming it — and if that row is in a
+  *different* group, it reminds you to check `SPORTS_ROOT_FOLDER_ID`. This is the
+  early warning that you're still pointed at the testing (or last season's)
+  Sports folder. It's a warning only; the mapping is still written.
+
+Two lines in the reply tell you whether you're writing where you think you are:
+`(created)` vs `(existing)`, and the presence of a ⚠️. A brand-new sport in a
+correctly-configured season should say `(created)` with no warning.
 
 ### Season rollover
 
@@ -287,6 +296,19 @@ untouched, so nobody has to re-run `/setup`.
 - `/whereami` in a topic — prints its `chat_id`, `thread_id`, and whether it
   resolves to a sport. Run this first whenever a mapping misbehaves; it tells you
   straight away whether you're looking at a wrong row or a missing one.
+
+### Retire a testing group
+
+Deleting or leaving the Telegram group does **not** clean up anything on the
+Google side — the rows stay `active = TRUE` and the folders stay in Drive. Do the
+cleanup in the sheet:
+
+1. Set `active = FALSE` on every row belonging to that `chat_id` (or just delete
+   the rows outright — there's no history worth keeping for a test group).
+2. Run `clearCache()`.
+
+Do this **before** running `reseasonFolders()`. That function only skips inactive
+rows, so live testing rows would get repointed into the production folders.
 
 ### Deactivate a thread
 
@@ -326,9 +348,10 @@ if the name genuinely isn't there yet — point it at a sport you already have.
 5. `/setup` bare → "needs a league and a sport".
 6. `/setup UAAP Men's Football` (no `|`) → names the missing separator.
 7. `/setup UAAP | Men's Football` in a fresh topic → folder created, `/recap` works there right away.
-8. The same `/setup` again → reply says *Updated* / *(existing)*, and the sheet still has **one** row for that thread.
-9. `/setup` from a non-admin account → refused, nothing written.
-10. `/sports` and `/whereami` → correct IDs and mapping status.
+8. The same `/setup` again → reply says *Updated* / *(existing)*, no ⚠️, and the sheet still has **one** row for that thread.
+9. `/setup` the same sport into a *second* topic → reply carries the ⚠️ folder-sharing warning.
+10. `/setup` from a non-admin account → refused, nothing written.
+11. `/sports` and `/whereami` → correct IDs and mapping status.
 
 Steps 5–9 are the ones worth actually doing — they're where a regression would
 silently corrupt the tracker rather than just fail loudly.
@@ -349,6 +372,8 @@ silently corrupt the tracker rather than just fail loudly.
 | `/setup` created a duplicate folder | The existing folder's name doesn't match `<LEAGUE> - <Sport>` exactly | Matching is exact. Rename the old folder to match, or move the docs and delete the stray. |
 | Docs are landing in last season's folders | `SPORTS_ROOT_FOLDER_ID` was repointed but `reseasonFolders()` never ran | Run `reseasonFolders()` from the editor. See "Season rollover". |
 | Two rows for the same thread | A row was added by hand alongside one written by `/setup` | Delete the stale row; `/setup` upserts and would never create a second one itself. |
+| `/setup` replies with "⚠️ This folder is already in use by…" | Another active row points at the same folder — usually `SPORTS_ROOT_FOLDER_ID` still aimed at the testing or last-season Sports folder | Repoint the property, set the stale rows to `active = FALSE`, `clearCache()`, then re-run `/setup`. |
+| Deleted the testing GC but it still shows in `/sports` counts | Deleting a Telegram group doesn't touch the sheet | Set those rows to `active = FALSE` or delete them. See "Retire a testing group". |
 | Duplicate docs created | A code path threw before the request completed, so Telegram retried | Check Executions logs; `doPost` is wrapped in try/catch specifically to prevent this. |
 | Changed the code but behavior is unchanged | Pushed but didn't cut a new deployment version | Deploy → Manage deployments → edit existing → New version. |
 

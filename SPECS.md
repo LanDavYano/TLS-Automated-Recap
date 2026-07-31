@@ -240,6 +240,40 @@ Ready — try /recap ADMU here.
 Second and later runs open with `Updated this topic's mapping:` and the folder
 line reads `(existing)`.
 
+### Folder-sharing warning
+
+Before writing the row, `/setup` scans for **other active rows already pointing at
+the resolved `folder_id`** and appends a warning naming each one.
+
+Sharing a folder is legal and does not error — which is exactly the problem.
+Every sharer's docs pile into one folder, and nothing else in the system would
+ever surface it. The two ways it happens in practice:
+
+- `SPORTS_ROOT_FOLDER_ID` still points at a previous season's — or the testing —
+  Sports folder, so a "new" sport silently resolves to an old folder.
+- The same sport got mapped to two topics.
+
+```
+⚠️ This folder is already in use by:
+• UAAP — Men's Basketball (another group, chat -100XXXXXXXXXX)
+Docs from all of them will land in the same folder.
+
+If that other group is the testing GC, check that SPORTS_ROOT_FOLDER_ID points at
+the current season's Sports folder, then set the old rows to active = FALSE.
+```
+
+Rules:
+
+- Scans the sheet snapshot taken **before** the upsert, so the row being written
+  never warns about itself — an idempotent re-run of `/setup` stays silent.
+- Only `active = TRUE` rows count. Deactivating the stale rows is the fix, and it
+  silences the warning.
+- The closing "testing GC" paragraph appears only when a sharer is in a
+  *different* chat. A same-group collision (one sport, two topics) omits it —
+  the root folder isn't the cause there.
+- It is a **warning, not a rejection.** The mapping is still written. Two topics
+  legitimately sharing a folder is a decision the editor is allowed to make.
+
 ### Argument validation
 
 Same principle as `/recap`: diagnose the specific mistake, echo what was typed,
@@ -376,7 +410,9 @@ function lookupThread(chatId, threadId)  // returns row object or null
 
 // Sheet writes (uncached, lock-protected)
 function readSportsSheet()      // {sheet, data, col} — live values, real row numbers
-function upsertSportRow(values) // insert or update on (chat_id, thread_id)
+function upsertSportRow(values, ctx)  // insert or update on (chat_id, thread_id)
+function findFolderSharers(ctx, folderId, chatId, threadId)
+function buildSharingWarning(sharers)
 function applyValues(rowArray, col, values)
 
 // Drive
@@ -396,6 +432,10 @@ function reseasonFolders()      // repoint active rows at the new season's root
 
 Writes must go through `readSportsSheet()`, never `getSportsMap()` — the cached
 map has no row numbers and may be up to 300s stale.
+
+`handleSetup()` reads the sheet **once** and passes that `ctx` to both
+`findFolderSharers()` and `upsertSportRow()`. Re-reading between them would let
+the scan see the row it is about to write.
 
 Use `UrlFetchApp.fetch()` for the Telegram Bot API. Set
 `muteHttpExceptions: true` on outbound calls so a Telegram-side error doesn't throw.
