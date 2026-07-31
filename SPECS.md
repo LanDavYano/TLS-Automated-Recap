@@ -13,8 +13,9 @@ A Telegram bot for a student sports newsroom. When a staffer types `/recap ADMU`
 sport-specific forum topic, the bot copies a Google Docs coverage template into that
 sport's Drive folder, names it by convention, and replies in-thread with the link.
 
-This removes two recurring pain points: manually duplicating the template before every
-game, and manually filing the finished doc into the right Drive folder afterward.
+This removes three recurring pain points: manually duplicating the template before every
+game, manually filing the finished doc into the right Drive folder afterward, and — via
+`/setup` — hand-extracting `chat_id`, `thread_id` and `folder_id` for every new sport GC.
 
 **Non-goals.** The bot does not fill in any content inside the document. It does not
 route by tournament round. It does not track or update state after creation.
@@ -30,15 +31,22 @@ route by tournament round. It does not track or update state after creation.
 - **Drive:** Target folders live in a Shared Drive; the executing account has Contributor
   access, which is sufficient for file creation via `makeCopy()`
 
-### Script Properties (already configured)
+### Script Properties
 
 | Property | Contents |
 |---|---|
 | `TELEGRAM_TOKEN` | Bot token for `@SportsRecap_bot` |
 | `SHEET_ID` | Spreadsheet ID of the mapping sheet |
+| `SPORTS_ROOT_FOLDER_ID` | **This season's** `Sports` folder. `/setup` creates each sport's subfolder here. |
+| `TEMPLATE_ID` | The coverage template Doc. One template across every sport. |
+| `SEASON` | Current season number (e.g. `89`). Written into new rows by `/setup`. Optional. |
 | `SHARED_SECRET` | Random string; see "Security" below |
 
 Read these via `PropertiesService.getScriptProperties()`. Never hardcode them.
+
+`SPORTS_ROOT_FOLDER_ID` is the one property that changes each season: the
+incoming Sports Editor creates a fresh `Sports` folder, and this property is
+repointed at it. See "Season rollover" below.
 
 ---
 
@@ -58,19 +66,35 @@ A single tab named `Sports` in the spreadsheet identified by `SHEET_ID`. Row 1 i
 - `thread_id` — forum topic ID. Same string-comparison rule.
 - `league` — filename segment, used verbatim (e.g. `UAAP`)
 - `sport` — filename segment, used verbatim (e.g. `Men's Basketball`)
-- `folder_id` — destination Drive folder for this thread's docs
-- `template_id` — Google Doc to copy
-- `season` — informational; not used in the filename currently
+- `folder_id` — destination Drive folder for this thread's docs. **Written by `/setup`**;
+  you should never have to paste one by hand.
+- `template_id` — per-row override. Normally blank — a blank cell falls back to the
+  `TEMPLATE_ID` script property, which is the real source of the template.
+- `season` — informational; not used in the filename currently. Populated from the
+  `SEASON` property when `/setup` writes a row.
 - `active` — `TRUE`/`FALSE`. Rows that are not truthy `TRUE` are treated as unmapped.
 
 **Do not assume column order.** Read the header row and build a name→index map, so that
-inserting a column later does not break the script.
+inserting a column later does not break the script. This applies to writes as well:
+`upsertSportRow()` only writes into columns that exist in the header row and ignores
+keys with no matching column, so it can never shift the table.
 
 ---
 
 ## Behavior
 
-### Command
+### Commands
+
+| Command | Purpose |
+|---|---|
+| `/recap <OPPONENT>` | Create the game doc for this thread's sport. |
+| `/setup <LEAGUE> \| <Sport>` | Map the topic it's typed in. Admin only. |
+| `/sports` | List the active mappings in this group. |
+| `/whereami` | Print this topic's raw IDs and mapping status. |
+
+Anything else is ignored silently.
+
+### `/recap`
 
 ```
 /recap <OPPONENT>
@@ -122,20 +146,28 @@ Created: UAAP: Men's Basketball - ADMU - 2026-09-06
 <doc URL>
 ```
 
-**Missing argument**
+**Bad argument** — three distinct causes, three distinct messages. A generic
+`Usage:` line doesn't tell a staffer *which* half they fumbled, so each rejection
+names the specific problem and then repeats the usage hint.
 
-```
-Usage: /recap <OPPONENT>
-Example: /recap ADMU
-```
+| Input | Reply opens with |
+|---|---|
+| `/recap` | `/recap needs an opponent.` |
+| `/recap Ateneo de Manila` | `Too many words — /recap takes one opponent.` plus `Try: /recap ATENEO` |
+| `/recap ???` | `That doesn't look like a school acronym: ???` |
 
-**Unmapped thread** — include the raw IDs so onboarding a new thread is copy-paste:
+Opponents must match `/^[A-Za-z0-9.\-&]{1,20}$/` — the acronym conventions in use
+(`UP`, `ADMU`, `NU`) all fit, and it keeps junk out of filenames.
+
+**Unmapped thread** — include the raw IDs, and point at the command that fixes it:
 
 ```
 This thread isn't mapped yet.
 chat_id: -100XXXXXXXXXX
 thread_id: 3
-Add a row to the Sports tab.
+
+Run: /setup <LEAGUE> | <Sport>
+Example: /setup UAAP | Men's Basketball
 ```
 
 **Failure during copy** — surface the error message rather than failing silently:
@@ -154,6 +186,114 @@ create a document.
 
 If `message_thread_id` is absent because the group is not a forum at all, the same
 unmapped path applies. No special handling needed.
+
+---
+
+## Onboarding: `/setup`
+
+```
+/setup <LEAGUE> | <Sport>
+```
+
+Example: `/setup UAAP | Men's Basketball`
+
+The design principle: **the bot already has the IDs.** Every update carries
+`chat.id` and `message_thread_id`, so onboarding must never require a human to
+extract, copy, or paste an ID. `/setup` reads them off its own update.
+
+**Steps**
+
+1. Reject if there is no `message_thread_id` — `/setup` is meaningless outside a
+   topic, and mapping the General topic would be a mistake.
+2. Reject if the sender is not `creator` or `administrator` (`getChatMember`).
+   `/setup` mutates shared configuration, so it is not open to the whole newsroom.
+   **Fails closed** — any API error denies the command.
+3. Split the argument on `|` into exactly two non-empty fields. Anything else is a
+   usage error.
+4. Acquire the script lock. The sheet write is read-modify-write; two concurrent
+   `/setup` calls without it can append duplicate rows.
+5. Resolve the folder: look for `<LEAGUE> - <Sport>` directly under
+   `SPORTS_ROOT_FOLDER_ID`, skipping trashed folders. Reuse on an exact name
+   match, create it otherwise.
+6. Upsert the row keyed on `(chat_id, thread_id)`, with `active = TRUE`.
+7. `clearCache()`, then reply with what happened.
+
+**Idempotency is required, not incidental.** Re-running `/setup` in an
+already-mapped topic must update that row in place, never append a second one.
+This is what makes season rollover and typo correction safe.
+
+**Folder naming** is `<league> - <sport>` (`UAAP - Men's Basketball`), flat, one
+level under the season's Sports root. The league prefix keeps two leagues running
+the same sport from colliding into one folder.
+
+**Reply**
+
+```
+Mapped this topic:
+UAAP — Men's Basketball
+Folder: UAAP - Men's Basketball (created)
+<folder URL>
+
+Ready — try /recap ADMU here.
+```
+
+Second and later runs open with `Updated this topic's mapping:` and the folder
+line reads `(existing)`.
+
+### Argument validation
+
+Same principle as `/recap`: diagnose the specific mistake, echo what was typed,
+then repeat the usage hint. Every one of these rejects **before** any folder is
+created or any row is written.
+
+| Input | Reply opens with |
+|---|---|
+| `/setup` | `/setup needs a league and a sport.` |
+| `/setup UAAP Men's Football` | `Missing the "\|" between the league and the sport.` + `You typed: …` |
+| `/setup UAAP \| Men's \| Football` | `Too many "\|" separators … but you gave 3.` |
+| `/setup \| Men's Football` | `The league is missing — it goes before the "\|".` |
+| `/setup UAAP \|` | `The sport is missing — it goes after the "\|".` |
+| league > 40 or sport > 60 chars | `That league or sport name is too long…` |
+
+The length caps exist because both fields become a Drive folder name.
+
+### Read-only commands
+
+`/sports` and `/whereami` take no arguments. Passing some is not an error — the
+command still answers, prefixed with
+`(/sports takes no arguments — ignoring "…")` so the user understands why what
+they typed had no effect.
+
+---
+
+## `/sports` and `/whereami`
+
+Read-only. No admin gate — they expose nothing a staffer can't already see.
+
+`/sports` lists this group's active mappings sorted by `thread_id`, with a count
+of active mappings in *other* groups appended. Empty result points at `/setup`.
+
+`/whereami` prints the group title, `chat_id`, `thread_id`, and either the
+resolved `league — sport` plus folder URL, or `Mapped: no`. This is the
+first thing to run when a mapping misbehaves — it distinguishes "wrong row" from
+"no row" immediately.
+
+---
+
+## Season rollover
+
+Each season the incoming Sports Editor creates a new `Sports` folder by hand.
+Rollover is then:
+
+1. Point `SPORTS_ROOT_FOLDER_ID` at the new folder (and bump `SEASON`).
+2. Run `reseasonFolders()` once from the editor.
+
+`reseasonFolders()` walks every active row, resolves `<league> - <sport>` under
+the *new* root — creating folders that don't exist yet — and rewrites `folder_id`
+in place. Mappings, chat IDs and thread IDs are untouched.
+
+Step 2 is not optional. `folder_id` is stored per row, so without it every active
+row keeps writing into last season's folders while looking perfectly healthy.
 
 ---
 
@@ -219,15 +359,43 @@ Single file, `Code.gs`, organized as:
 
 ```javascript
 function doPost(e)              // entry point, try/catch wrapper, never throws (always 200)
-function handleUpdate(update)   // parse, route, orchestrate
+function handleUpdate(update)   // validate, parse, route by command
 function parseCommand(text)     // strip @botname, return {command, args}
-function getSportsMap()         // cached sheet read, header-driven column mapping
+function formatThreadId(id)     // absent thread -> '(none)'
+
+// Command handlers
+function handleRecap(chatId, threadId, args)
+function handleSetup(message, chatId, threadId, args)
+function handleSports(chatId, threadId)
+function handleWhereami(message, chatId, threadId)
+
+// Sheet reads (cached)
+function getSportsSheet()       // opens the Sports tab, readable error if missing
+function getSportsMap()         // cached read, header-driven column mapping
 function lookupThread(chatId, threadId)  // returns row object or null
+
+// Sheet writes (uncached, lock-protected)
+function readSportsSheet()      // {sheet, data, col} — live values, real row numbers
+function upsertSportRow(values) // insert or update on (chat_id, thread_id)
+function applyValues(rowArray, col, values)
+
+// Drive
+function buildFolderName(league, sport)
+function resolveSportFolder(rootId, folderName)  // {folder, created}
 function buildFilename(row, opponent)
 function createDoc(row, filename)
+
+// Telegram
 function sendMessage(chatId, threadId, text)
-function clearCache()           // manual utility
+function isChatAdmin(chatId, userId)  // gates /setup; fails closed
+
+// Utilities (run from the editor)
+function clearCache()
+function reseasonFolders()      // repoint active rows at the new season's root
 ```
+
+Writes must go through `readSportsSheet()`, never `getSportsMap()` — the cached
+map has no row numbers and may be up to 300s stale.
 
 Use `UrlFetchApp.fetch()` for the Telegram Bot API. Set
 `muteHttpExceptions: true` on outbound calls so a Telegram-side error doesn't throw.
@@ -244,15 +412,28 @@ is live.
 Also provide `testLookup()` that logs the parsed `Sports` map, to confirm header
 parsing and string comparison of the large negative chat IDs.
 
+`testResolveFolder()` confirms the Sports root is reachable and that folder
+resolution **reuses** an existing folder rather than creating a duplicate — the
+one behaviour that would quietly scatter docs if it broke.
+
 ### Manual verification checklist
 
 1. `testLookup()` logs both mapped threads correctly
-2. `testCreateDoc()` produces a correctly named doc in the correct folder
-3. Deploy as web app, register webhook, confirm `getWebhookInfo` shows no error
-4. `/recap ADMU` in a mapped thread → doc created, reply arrives **in that thread**
-5. `/recap` bare → usage hint, no doc created
-6. `/recap ADMU` in General topic → unmapped error, no doc created
-7. `/recap ADMU` in an unmapped thread → error shows the correct chat and thread IDs
+2. `testResolveFolder()` reports `Reused:` for a sport that already has a folder
+3. `testCreateDoc()` produces a correctly named doc in the correct folder
+4. Deploy as web app, register webhook, confirm `getWebhookInfo` shows no error
+5. `/recap ADMU` in a mapped thread → doc created, reply arrives **in that thread**
+6. `/recap` bare → usage hint, no doc created
+7. `/recap ADMU` in General topic → unmapped error, no doc created
+8. `/recap ADMU` in an unmapped thread → error shows the correct chat and thread IDs
+9. `/setup UAAP | Men's Football` in a fresh topic → folder created, row appended,
+   `/recap` works immediately (no `clearCache()` needed)
+10. Same `/setup` run a **second** time → reply says *Updated*, folder says
+    *(existing)*, and the sheet still has exactly one row for that thread
+11. `/setup` in the General topic → refused, no row written
+12. `/setup` from a non-admin account → refused, no row written
+13. `/sports` lists the group's mappings; `/whereami` shows the right IDs in both a
+    mapped and an unmapped topic
 
 ---
 
@@ -284,7 +465,8 @@ reliably in forum topics.
 - Round-based subfolder routing via a second `Rounds` tab keyed on date ranges
 - Placeholder substitution inside the copied doc (`replaceText` on `[Opponent]`)
 - Setting editor permissions on the created doc for assigned staffers
-- A `season` column driving filename or folder selection across seasons
+- `/unmap` to flip `active` to `FALSE` from chat instead of editing the sheet
+- Rollover as a chat command rather than an editor run
 
 Keep the sheet-driven lookup pattern intact so any of these becomes a schema addition
 rather than a rewrite.
